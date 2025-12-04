@@ -156,8 +156,7 @@ add_ftp_account() {
     read -rp "🔢 FTP 端口 (默认 21，回车使用默认)： " FTP_PORT
     FTP_PORT=${FTP_PORT:-21}
     read -rp "👤 FTP 用户名： " FTP_USER
-    read -rsp "🔒 FTP 密码（输入时不显示）： " FTP_PASS
-    echo
+    read -rp "🔒 FTP 密码： " FTP_PASS
 
     cat > "$file" <<EOF
 ACCOUNT_ID="$ACCOUNT_ID"
@@ -254,7 +253,7 @@ delete_ftp_account() {
     pause
 }
 
-# ✅ 账号选择：用全局变量 CHOSEN_ACCOUNT_ID，避免 $(...) 搞乱输出
+
 CHOSEN_ACCOUNT_ID=""
 
 select_ftp_account() {
@@ -375,7 +374,7 @@ add_cron_job() {
     LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
     REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
 
-    # 在末尾加 # FTP_BACKUP[account_id] 方便识别和按账号删除
+
     local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG[$ACCOUNT_ID]"
 
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
@@ -469,19 +468,22 @@ add_backup_job() {
     echo "➕ 新建备份任务"
     echo "────────────────────────────────"
     echo "⚠️  注意：为了避免转义问题，暂不支持路径中包含空格。"
+    while true; do
     read -rp "📁 请输入要备份的本地文件/目录路径： " LOCAL_PATH
 
     if [[ "$LOCAL_PATH" =~ \  ]]; then
-        echo "❌ 路径中包含空格，目前不支持，请换一个路径（可用软链接等方式）。"
-        pause
-        return
+        echo "❌ 路径中包含空格，请换一个路径（可用软链接）。"
+        continue
     fi
 
     if [[ ! -e "$LOCAL_PATH" ]]; then
-        echo "❌ 该路径不存在，请确认后重新在菜单中添加。"
-        pause
-        return
+        echo "❌ 路径不存在，请重新输入！"
+        continue
     fi
+
+    break
+    done
+
 
     read -rp "📂 请输入 FTP 目标目录（例如 /backup/www 或 backup）： " REMOTE_DIR
 
