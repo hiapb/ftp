@@ -348,7 +348,7 @@ show_menu() {
     echo "2) ➕ 新建备份任务"
     echo "3) 📋 查看备份任务"
     echo "4) 🗑 删除备份任务"
-    echo "5) 🧹 卸载（删除定时任务和 FTP 配置）"
+    echo "5) 🧹 卸载"
     echo "0) ❎ 退出"
     echo
     read -rp "👉 请输入选项编号： " choice
