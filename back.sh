@@ -522,9 +522,9 @@ uninstall_all() {
             fi
             rm -rf "$CONFIG_DIR"
             echo "✅ 卸载完成（已删除 FTP 配置和相关定时任务）。"
+            echo "👋 程序已自动退出。"
+            exit 0   # 👈 卸载后立即退出
             ;;
-
-            exit 0
         *)
             echo "ℹ️  已取消卸载。"
             ;;
