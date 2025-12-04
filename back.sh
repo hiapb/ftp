@@ -319,12 +319,13 @@ browse_ftp_with_account() {
                 fi
                 echo "📋 $REMOTE_DIR 下的内容："
                 echo "────────────────────────────────"
-                lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF | awk '!($NF=="." || $NF=="..")'
 set ssl:verify-certificate no
 cd "$REMOTE_DIR" || cd .
 ls
 bye
 EOF
+
                 echo "────────────────────────────────"
                 pause
                 ;;
