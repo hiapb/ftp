@@ -3,20 +3,51 @@
 # ===================== 基本变量 =====================
 CONFIG_DIR="$HOME/.ftp_backup_tool"
 ACCOUNTS_DIR="$CONFIG_DIR/accounts"
-CONFIG_FILE="$CONFIG_DIR/ftp.conf"   # 旧版本遗留，不再使用，仅保留不影响
+CONFIG_FILE="$CONFIG_DIR/ftp.conf"
 TAG="# FTP_BACKUP"
-SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+
+
+RAW_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
+SCRIPT_PATH="$RAW_SCRIPT_PATH"
+
+
+SCRIPT_URL="https://raw.githubusercontent.com/hiapb/ftp/main/back.sh"
+INSTALL_PATH="/root/back.sh"
 
 mkdir -p "$ACCOUNTS_DIR"
 
 # ===================== 通用工具函数 =====================
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# 如果是通过 bash <(curl ...) 这种方式运行，自动落盘到 INSTALL_PATH
+normalize_script_path() {
+    # 典型的 process-substitution 路径：/dev/fd/63 或 /proc/xxx/fd/yyy 或包含 pipe:[
+    if [[ "$SCRIPT_PATH" == /dev/fd/* ]] || [[ "$SCRIPT_PATH" == /proc/*/fd/* ]] || [[ "$SCRIPT_PATH" == *"pipe:"* ]]; then
+        # 如果还没有正式安装文件，就自动创建一个
+        if [[ ! -f "$INSTALL_PATH" ]]; then
+            echo "📥 检测到通过 bash <(curl ...) 运行，正在自动安装脚本到：$INSTALL_PATH"
+            if command_exists curl; then
+                curl -fsSL "$SCRIPT_URL" -o "$INSTALL_PATH" || cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
+            elif command_exists wget; then
+                wget -qO "$INSTALL_PATH" "$SCRIPT_URL" || cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
+            else
+                # 没有 curl / wget，就直接把当前脚本内容拷贝过去
+                cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
+            fi
+            chmod +x "$INSTALL_PATH"
+            echo "✅ 安装完成，以后 crontab 将使用：$INSTALL_PATH"
+        fi
+        SCRIPT_PATH="$INSTALL_PATH"
+    fi
+}
+
+normalize_script_path
+
 pause() {
     echo
     read -rp "🔸 按回车键继续..." _
-}
-
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
 }
 
 # ensure_command <cmd> <deb_pkg> <rhel_pkg> <other_pkg>
@@ -223,14 +254,16 @@ delete_ftp_account() {
     pause
 }
 
-# ✅ 修好后的选择账号函数：只在成功时回显账号名本身
+# ✅ 账号选择：用全局变量 CHOSEN_ACCOUNT_ID，避免 $(...) 搞乱输出
+CHOSEN_ACCOUNT_ID=""
+
 select_ftp_account() {
     shopt -s nullglob
     local files=("$ACCOUNTS_DIR"/*.conf)
     shopt -u nullglob
 
     if [[ ${#files[@]} -eq 0 ]]; then
-        echo "❌ 当前没有 FTP 账号，请先添加。" >&2
+        echo "❌ 当前没有 FTP 账号，请先添加。"
         return 1
     fi
 
@@ -251,12 +284,11 @@ select_ftp_account() {
     echo
     read -rp "👉 请输入账号编号： " choice
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${ACCOUNT_IDS[$choice]}" ]]; then
-        echo "❌ 输入编号无效。" >&2
+        echo "❌ 输入编号无效。"
         return 1
     fi
 
-    # 这里只输出账号名本身，给 $(...) 捕获
-    echo "${ACCOUNT_IDS[$choice]}"
+    CHOSEN_ACCOUNT_ID="${ACCOUNT_IDS[$choice]}"
     return 0
 }
 
@@ -459,9 +491,10 @@ add_backup_job() {
         return
     fi
 
-    # 选择 FTP 账号
-    local ACCOUNT_ID
-    ACCOUNT_ID=$(select_ftp_account) || { pause; return; }
+    # 选择 FTP 账号（内部展示账号列表）
+    CHOSEN_ACCOUNT_ID=""
+    select_ftp_account || { pause; return; }
+    local ACCOUNT_ID="$CHOSEN_ACCOUNT_ID"
 
     echo
     echo "⏱ 请选择定时方式："
@@ -553,7 +586,7 @@ show_menu() {
     echo "1) 📂 管理 FTP 账号"
     echo "2) ➕ 新建备份任务"
     echo "3) 📋 查看/立即执行备份任务"
-    echo "4)  🗑 删除备份任务"
+    echo "4) 🗑 删除备份任务"
     echo "5) 🧹 卸载"
     echo "0) ❎ 退出"
     echo
@@ -580,7 +613,7 @@ show_menu() {
 
 # ===================== 入口逻辑 =====================
 
-# crontab 调用：bash ftp_backup.sh run <ACCOUNT_ID> <LOCAL_PATH> <REMOTE_DIR>
+# crontab 调用：bash back.sh run <ACCOUNT_ID> <LOCAL_PATH> <REMOTE_DIR>
 if [[ "$1" == "run" ]]; then
     run_backup "$2" "$3" "$4"
     exit $?
