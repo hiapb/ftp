@@ -6,10 +6,8 @@ ACCOUNTS_DIR="$CONFIG_DIR/accounts"
 CONFIG_FILE="$CONFIG_DIR/ftp.conf"
 TAG="# FTP_BACKUP"
 
-
 RAW_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 SCRIPT_PATH="$RAW_SCRIPT_PATH"
-
 
 SCRIPT_URL="https://raw.githubusercontent.com/hiapb/ftp/main/back.sh"
 INSTALL_PATH="/root/back.sh"
@@ -253,7 +251,6 @@ delete_ftp_account() {
     pause
 }
 
-
 CHOSEN_ACCOUNT_ID=""
 
 select_ftp_account() {
@@ -291,6 +288,115 @@ select_ftp_account() {
     return 0
 }
 
+browse_ftp_with_account() {
+    CHOSEN_ACCOUNT_ID=""
+    select_ftp_account || { pause; return; }
+    local ACCOUNT_ID="$CHOSEN_ACCOUNT_ID"
+
+    load_ftp_account "$ACCOUNT_ID" || { pause; return; }
+
+    while true; do
+        clear
+        echo "======================================="
+        echo "🔍 FTP 远程浏览 / 删除"
+        echo "======================================="
+        echo "当前账号：$ACCOUNT_ID  ($FTP_USER@$FTP_HOST:$FTP_PORT)"
+        echo
+        echo "1) 📁 列出某个远程目录内容"
+        echo "2) ❌ 删除远程文件"
+        echo "3) ⚠️ 删除远程目录"
+        echo "0) ⬅ 返回上一层"
+        echo
+        read -rp "👉 请输入选项编号： " sub
+
+        case "$sub" in
+            1)
+                read -rp "📂 请输入要查看的远程目录（例如 / 或 /backup/www）： " REMOTE_DIR
+                if [[ -z "$REMOTE_DIR" ]]; then
+                    echo "❌ 远程目录不能为空。"
+                    pause
+                    continue
+                fi
+                echo "📋 $REMOTE_DIR 下的内容："
+                echo "────────────────────────────────"
+                lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+set ssl:verify-certificate no
+cd "$REMOTE_DIR" || cd .
+ls
+bye
+EOF
+                echo "────────────────────────────────"
+                pause
+                ;;
+            2)
+                read -rp "📂 请输入文件所在远程目录（例如 /backup/www）： " REMOTE_DIR
+                read -rp "📄 请输入要删除的文件名（例如 index.html）： " REMOTE_FILE
+                if [[ -z "$REMOTE_DIR" || -z "$REMOTE_FILE" ]]; then
+                    echo "❌ 目录和文件名都不能为空。"
+                    pause
+                    continue
+                fi
+                read -rp "⚠️ 确认要删除文件 $REMOTE_DIR/$REMOTE_FILE 吗？(y/N)： " yn
+                case "$yn" in
+                    y|Y)
+                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+set ssl:verify-certificate no
+cd "$REMOTE_DIR" || exit 1
+rm "$REMOTE_FILE"
+bye
+EOF
+                        if [[ $? -eq 0 ]]; then
+                            echo "✅ 已删除远程文件：$REMOTE_DIR/$REMOTE_FILE"
+                        else
+                            echo "❌ 删除失败，请检查路径和权限。"
+                        fi
+                        pause
+                        ;;
+                    *)
+                        echo "ℹ️ 已取消删除。"
+                        pause
+                        ;;
+                esac
+                ;;
+            3)
+                read -rp "📂 请输入要删除的远程目录（例如 /backup/tmp）： " REMOTE_DIR
+                if [[ -z "$REMOTE_DIR" ]]; then
+                    echo "❌ 远程目录不能为空。"
+                    pause
+                    continue
+                fi
+                read -rp "⚠️ 确认**递归删除整个目录** $REMOTE_DIR 吗？此操作不可恢复！(y/N)： " yn2
+                case "$yn2" in
+                    y|Y)
+                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+set ssl:verify-certificate no
+rm -r "$REMOTE_DIR"
+bye
+EOF
+                        if [[ $? -eq 0 ]]; then
+                            echo "✅ 已删除远程目录：$REMOTE_DIR"
+                        else
+                            echo "❌ 删除失败，请检查路径和权限。"
+                        fi
+                        pause
+                        ;;
+                    *)
+                        echo "ℹ️ 已取消删除目录操作。"
+                        pause
+                        ;;
+                esac
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo "❌ 无效选项。"
+                pause
+                ;;
+        esac
+    done
+}
+
 ftp_account_menu() {
     while true; do
         clear
@@ -302,6 +408,7 @@ ftp_account_menu() {
         echo "1) ➕ 新增 FTP 账号"
         echo "2) 📋 查看 FTP 账号列表"
         echo "3) 🗑 删除 FTP 账号"
+        echo "4) 🔍 使用账号浏览/删除远程文件"
         echo "0) ⬅ 返回主菜单"
         echo
         read -rp "👉 请输入选项编号： " choice
@@ -310,6 +417,7 @@ ftp_account_menu() {
             1) add_ftp_account ;;
             2) show_ftp_accounts ;;
             3) delete_ftp_account ;;
+            4) browse_ftp_with_account ;;
             0) break ;;
             *) echo "❌ 无效选项。"; pause ;;
         esac
@@ -373,7 +481,6 @@ add_cron_job() {
     # 转义 "
     LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
     REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
-
 
     local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG[$ACCOUNT_ID]"
 
@@ -468,22 +575,22 @@ add_backup_job() {
     echo "➕ 新建备份任务"
     echo "────────────────────────────────"
     echo "⚠️  注意：为了避免转义问题，暂不支持路径中包含空格。"
+
     while true; do
-    read -rp "📁 请输入要备份的本地文件/目录路径： " LOCAL_PATH
+        read -rp "📁 请输入要备份的本地文件/目录路径： " LOCAL_PATH
 
-    if [[ "$LOCAL_PATH" =~ \  ]]; then
-        echo "❌ 路径中包含空格，请换一个路径（可用软链接）。"
-        continue
-    fi
+        if [[ "$LOCAL_PATH" =~ \  ]]; then
+            echo "❌ 路径中包含空格，请换一个路径（可用软链接）。"
+            continue
+        fi
 
-    if [[ ! -e "$LOCAL_PATH" ]]; then
-        echo "❌ 路径不存在，请重新输入！"
-        continue
-    fi
+        if [[ ! -e "$LOCAL_PATH" ]]; then
+            echo "❌ 路径不存在，请重新输入！"
+            continue
+        fi
 
-    break
+        break
     done
-
 
     read -rp "📂 请输入 FTP 目标目录（例如 /backup/www 或 backup）： " REMOTE_DIR
 
@@ -548,9 +655,10 @@ uninstall_all() {
     echo "────────────────────────────────"
     echo "🧹 卸载工具"
     echo "────────────────────────────────"
-    read -rp "⚠️  确定要卸载吗？这会删除所有 FTP 账号配置和本工具创建的定时任务。(y/N)： " ans
+    read -rp "⚠️  确定要卸载吗？这会删除所有 FTP 账号配置、备份任务和脚本本体。(y/N)： " ans
     case "$ans" in
         y|Y)
+            # 删除定时任务
             if command_exists crontab; then
                 local current
                 current=$(crontab -l 2>/dev/null || true)
@@ -558,9 +666,17 @@ uninstall_all() {
                     echo "$current" | grep -v "$TAG" | crontab -
                 fi
             fi
+
+            # 删除配置目录
             rm -rf "$CONFIG_DIR"
-            echo "✅ 卸载完成（已删除 FTP 配置和相关定时任务）。"
-            echo "👋 程序已自动退出。"
+
+            # 删除脚本本体
+            if [[ -f "$SCRIPT_PATH" ]]; then
+                rm -f "$SCRIPT_PATH"
+            fi
+
+            echo "✅ 已卸载（已删除 FTP 配置、任务和脚本本体）。"
+            echo "👋 程序已退出。"
             exit 0
             ;;
         *)
@@ -569,6 +685,7 @@ uninstall_all() {
     esac
     pause
 }
+
 
 # ===================== 主菜单 =====================
 show_menu() {
