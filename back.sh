@@ -223,18 +223,19 @@ delete_ftp_account() {
     pause
 }
 
+# ✅ 修好后的选择账号函数：只在成功时回显账号名本身
 select_ftp_account() {
     shopt -s nullglob
     local files=("$ACCOUNTS_DIR"/*.conf)
     shopt -u nullglob
 
     if [[ ${#files[@]} -eq 0 ]]; then
-        echo "❌ 当前没有 FTP 账号，请先添加。"
+        echo "❌ 当前没有 FTP 账号，请先添加。" >&2
         return 1
     fi
 
     echo "────────────────────────────────"
-    echo "📂 请选择要使用的 FTP 账号："
+    echo "📂 可用 FTP 账号列表："
     echo "────────────────────────────────"
 
     local i=1
@@ -247,12 +248,14 @@ select_ftp_account() {
         i=$((i+1))
     done
 
+    echo
     read -rp "👉 请输入账号编号： " choice
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${ACCOUNT_IDS[$choice]}" ]]; then
-        echo "❌ 输入编号无效。"
+        echo "❌ 输入编号无效。" >&2
         return 1
     fi
 
+    # 这里只输出账号名本身，给 $(...) 捕获
     echo "${ACCOUNT_IDS[$choice]}"
     return 0
 }
@@ -523,7 +526,7 @@ uninstall_all() {
             rm -rf "$CONFIG_DIR"
             echo "✅ 卸载完成（已删除 FTP 配置和相关定时任务）。"
             echo "👋 程序已自动退出。"
-            exit 0   # 👈 卸载后立即退出
+            exit 0
             ;;
         *)
             echo "ℹ️  已取消卸载。"
@@ -550,7 +553,7 @@ show_menu() {
     echo "1) 📂 管理 FTP 账号"
     echo "2) ➕ 新建备份任务"
     echo "3) 📋 查看/立即执行备份任务"
-    echo "4) 🗑 删除备份任务"
+    echo "4)  🗑 删除备份任务"
     echo "5) 🧹 卸载"
     echo "0) ❎ 退出"
     echo
