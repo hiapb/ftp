@@ -19,9 +19,8 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 如果是通过 bash <(curl ...) 这种方式运行，自动落盘到 INSTALL_PATH
+
 normalize_script_path() {
-    # 典型的 process-substitution 路径：/dev/fd/63 或 /proc/xxx/fd/yyy 或包含 pipe:[
     if [[ "$SCRIPT_PATH" == /dev/fd/* ]] || [[ "$SCRIPT_PATH" == /proc/*/fd/* ]] || [[ "$SCRIPT_PATH" == *"pipe:"* ]]; then
         # 如果还没有正式安装文件，就自动创建一个
         if [[ ! -f "$INSTALL_PATH" ]]; then
@@ -366,7 +365,7 @@ EOF
                     pause
                     continue
                 fi
-                read -rp "⚠️ 确认**递归删除整个目录** $REMOTE_DIR 吗？此操作不可恢复！(y/N)： " yn2
+                read -rp "⚠️ 确认**删除整个目录** $REMOTE_DIR 吗？此操作不可恢复！(y/N)： " yn2
                 case "$yn2" in
                     y|Y)
                         lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
