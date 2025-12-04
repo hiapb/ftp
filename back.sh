@@ -2,13 +2,14 @@
 
 # ===================== 基本变量 =====================
 CONFIG_DIR="$HOME/.ftp_backup_tool"
-CONFIG_FILE="$CONFIG_DIR/ftp.conf"
+ACCOUNTS_DIR="$CONFIG_DIR/accounts"
+CONFIG_FILE="$CONFIG_DIR/ftp.conf"   # 旧版本遗留，不再使用，仅保留不影响
 TAG="# FTP_BACKUP"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 
-mkdir -p "$CONFIG_DIR"
+mkdir -p "$ACCOUNTS_DIR"
 
-# ===================== 工具函数 =====================
+# ===================== 通用工具函数 =====================
 pause() {
     echo
     read -rp "🔸 按回车键继续..." _
@@ -32,17 +33,17 @@ ensure_command() {
     echo "⚙️  未检测到依赖：$cmd，尝试自动安装..."
 
     if command_exists apt-get; then
-        # Debian / Ubuntu / Deepin 等
+        # Debian / Ubuntu
         local pkg="${deb_pkg:-$cmd}"
         echo "📦 使用 apt-get 安装：$pkg"
         sudo apt-get update && sudo apt-get install -y "$pkg"
     elif command_exists yum; then
-        # CentOS / AlmaLinux / Rocky 等
+        # CentOS / AlmaLinux / Rocky
         local pkg="${rhel_pkg:-$cmd}"
         echo "📦 使用 yum 安装：$pkg"
         sudo yum install -y "$pkg"
     elif command_exists dnf; then
-        # 新一点的 RHEL 系
+        # 新版 RHEL 系
         local pkg="${rhel_pkg:-$cmd}"
         echo "📦 使用 dnf 安装：$pkg"
         sudo dnf install -y "$pkg"
@@ -72,27 +73,54 @@ check_dependencies() {
     # lftp：各大发行版包名基本一样
     ensure_command lftp lftp lftp lftp || exit 1
 
-    # crontab 命令：Debian 系 cron，RHEL 系 cronie
-    # 这里即使安装失败也不退出，只要系统本身已经有 cron 就行
+    # crontab：Debian 系 cron，RHEL 系 cronie
     ensure_command crontab cron cronie cron || true
 }
 
-# ===================== FTP 配置 =====================
+# ===================== FTP 账号管理 =====================
 is_ftp_configured() {
-    [[ -f "$CONFIG_FILE" ]]
+    shopt -s nullglob
+    local files=("$ACCOUNTS_DIR"/*.conf)
+    shopt -u nullglob
+    [[ ${#files[@]} -gt 0 ]]
 }
 
-load_ftp_config() {
-    if is_ftp_configured; then
-        # shellcheck disable=SC1090
-        source "$CONFIG_FILE"
+get_ftp_count() {
+    shopt -s nullglob
+    local files=("$ACCOUNTS_DIR"/*.conf)
+    shopt -u nullglob
+    echo ${#files[@]}
+}
+
+load_ftp_account() {
+    local account_id="$1"
+    local file="$ACCOUNTS_DIR/$account_id.conf"
+    if [[ ! -f "$file" ]]; then
+        echo "❌ 找不到 FTP 账号配置：$account_id"
+        return 1
     fi
+    # shellcheck disable=SC1090
+    source "$file"
 }
 
-config_ftp() {
+add_ftp_account() {
     echo "────────────────────────────────"
-    echo "🔑 配置 FTP 账号"
+    echo "➕ 新增 FTP 账号"
     echo "────────────────────────────────"
+    read -rp "📝 为此账号起一个名称（例如 main、backup1）： " ACCOUNT_ID
+    ACCOUNT_ID="${ACCOUNT_ID// /_}"  # 名称里如果有空格，替换成下划线
+
+    if [[ -z "$ACCOUNT_ID" ]]; then
+        echo "❌ 账号名称不能为空。"
+        pause
+        return
+    fi
+
+    local file="$ACCOUNTS_DIR/$ACCOUNT_ID.conf"
+    if [[ -f "$file" ]]; then
+        echo "⚠️  已存在同名账号配置，将覆盖该账号。"
+    fi
+
     read -rp "🌐 FTP 主机 (例如 ftp.example.com)： " FTP_HOST
     read -rp "🔢 FTP 端口 (默认 21，回车使用默认)： " FTP_PORT
     FTP_PORT=${FTP_PORT:-21}
@@ -100,41 +128,180 @@ config_ftp() {
     read -rsp "🔒 FTP 密码（输入时不显示）： " FTP_PASS
     echo
 
-    cat > "$CONFIG_FILE" <<EOF
+    cat > "$file" <<EOF
+ACCOUNT_ID="$ACCOUNT_ID"
 FTP_HOST="$FTP_HOST"
 FTP_PORT="$FTP_PORT"
 FTP_USER="$FTP_USER"
 FTP_PASS="$FTP_PASS"
 EOF
 
-    chmod 600 "$CONFIG_FILE"
-    echo "✅ FTP 配置已保存到：$CONFIG_FILE"
+    chmod 600 "$file"
+    echo "✅ 新 FTP 账号已保存：$ACCOUNT_ID"
     pause
 }
 
-# ===================== 备份执行逻辑（给定参数时执行） =====================
-run_backup() {
-    local LOCAL_PATH="$1"
-    local REMOTE_DIR="$2"
+show_ftp_accounts() {
+    echo "────────────────────────────────"
+    echo "📂 FTP 账号列表"
+    echo "────────────────────────────────"
 
-    load_ftp_config
+    shopt -s nullglob
+    local files=("$ACCOUNTS_DIR"/*.conf)
+    shopt -u nullglob
 
-    if [[ -z "$FTP_HOST" || -z "$FTP_USER" || -z "$FTP_PASS" ]]; then
-        echo "❌ FTP 配置不完整，请先在菜单中配置 FTP 账号。"
-        exit 1
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "ℹ️  当前没有任何 FTP 账号配置。"
+        pause
+        return
     fi
+
+    local i=1
+    for f in "${files[@]}"; do
+        # shellcheck disable=SC1090
+        source "$f"
+        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST  | 用户：$FTP_USER"
+        i=$((i+1))
+    done
+
+    pause
+}
+
+delete_ftp_account() {
+    echo "────────────────────────────────"
+    echo "🗑 删除 FTP 账号"
+    echo "────────────────────────────────"
+
+    shopt -s nullglob
+    local files=("$ACCOUNTS_DIR"/*.conf)
+    shopt -u nullglob
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "ℹ️  当前没有可删除的 FTP 账号。"
+        pause
+        return
+    fi
+
+    local i=1
+    declare -a ACCOUNT_IDS
+    for f in "${files[@]}"; do
+        # shellcheck disable=SC1090
+        source "$f"
+        ACCOUNT_IDS[$i]="$ACCOUNT_ID"
+        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST"
+        i=$((i+1))
+    done
+
+    read -rp "🔢 请输入要删除的账号编号： " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${ACCOUNT_IDS[$choice]}" ]]; then
+        echo "❌ 输入编号无效。"
+        pause
+        return
+    fi
+
+    local target_id="${ACCOUNT_IDS[$choice]}"
+    local file="$ACCOUNTS_DIR/$target_id.conf"
+
+    read -rp "⚠️  确认删除账号 [$target_id] 以及其所有备份任务吗？(y/N)： " yn
+    case "$yn" in
+        y|Y)
+            rm -f "$file"
+            if command_exists crontab; then
+                local current
+                current=$(crontab -l 2>/dev/null || true)
+                if [[ -n "$current" ]]; then
+                    # 每个任务尾部会有 # FTP_BACKUP[account_id]
+                    echo "$current" | grep -v "$TAG\[$target_id\]" | crontab -
+                fi
+            fi
+            echo "✅ 已删除账号 [$target_id] 及其相关定时任务。"
+            ;;
+        *)
+            echo "ℹ️  已取消删除。"
+            ;;
+    esac
+    pause
+}
+
+select_ftp_account() {
+    shopt -s nullglob
+    local files=("$ACCOUNTS_DIR"/*.conf)
+    shopt -u nullglob
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "❌ 当前没有 FTP 账号，请先添加。"
+        return 1
+    fi
+
+    echo "────────────────────────────────"
+    echo "📂 请选择要使用的 FTP 账号："
+    echo "────────────────────────────────"
+
+    local i=1
+    declare -a ACCOUNT_IDS
+    for f in "${files[@]}"; do
+        # shellcheck disable=SC1090
+        source "$f"
+        ACCOUNT_IDS[$i]="$ACCOUNT_ID"
+        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST"
+        i=$((i+1))
+    done
+
+    read -rp "👉 请输入账号编号： " choice
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${ACCOUNT_IDS[$choice]}" ]]; then
+        echo "❌ 输入编号无效。"
+        return 1
+    fi
+
+    echo "${ACCOUNT_IDS[$choice]}"
+    return 0
+}
+
+ftp_account_menu() {
+    while true; do
+        clear
+        echo "======================================="
+        echo "📂 FTP 账号管理"
+        echo "======================================="
+        echo "当前账号数量：$(get_ftp_count)"
+        echo
+        echo "1) ➕ 新增 FTP 账号"
+        echo "2) 📋 查看 FTP 账号列表"
+        echo "3) 🗑 删除 FTP 账号"
+        echo "0) ⬅ 返回主菜单"
+        echo
+        read -rp "👉 请输入选项编号： " choice
+
+        case "$choice" in
+            1) add_ftp_account ;;
+            2) show_ftp_accounts ;;
+            3) delete_ftp_account ;;
+            0) break ;;
+            *) echo "❌ 无效选项。"; pause ;;
+        esac
+    done
+}
+
+# ===================== 实际备份逻辑 =====================
+run_backup() {
+    local ACCOUNT_ID="$1"
+    local LOCAL_PATH="$2"
+    local REMOTE_DIR="$3"
+
+    load_ftp_account "$ACCOUNT_ID" || return 1
 
     if [[ ! -e "$LOCAL_PATH" ]]; then
         echo "❌ 本地路径不存在：$LOCAL_PATH"
-        exit 1
+        return 1
     fi
 
     echo "🚀 开始备份："
+    echo "  👤 FTP 账号：$ACCOUNT_ID ($FTP_USER@$FTP_HOST:$FTP_PORT)"
     echo "  📁 本地路径：$LOCAL_PATH"
     echo "  📂 FTP 目标目录：$REMOTE_DIR"
 
     if [[ -d "$LOCAL_PATH" ]]; then
-        # 目录 用 mirror -R
+        # 目录：mirror -R
         lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
 mkdir -p "$REMOTE_DIR"
@@ -142,7 +309,7 @@ mirror -R "$LOCAL_PATH" "$REMOTE_DIR"
 bye
 EOF
     else
-        # 文件 用 put
+        # 文件：put
         local filename
         filename="$(basename "$LOCAL_PATH")"
         lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
@@ -158,6 +325,7 @@ EOF
         echo "✅ 备份完成。"
     else
         echo "❌ 备份失败，请检查网络与配置。"
+        return 1
     fi
 }
 
@@ -166,18 +334,19 @@ add_cron_job() {
     local CRON_EXPR="$1"
     local LOCAL_PATH="$2"
     local REMOTE_DIR="$3"
+    local ACCOUNT_ID="$4"
 
-    # 将本地/远程路径中的双引号替换成转义形式，避免破坏 crontab 格式
+    # 转义 "
     LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
     REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
 
-    local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG"
+    # 在末尾加 # FTP_BACKUP[account_id] 方便识别和按账号删除
+    local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG[$ACCOUNT_ID]"
 
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
 
     echo "✅ 定时任务已添加："
     echo "   $CRON_LINE"
-    pause
 }
 
 list_cron_jobs() {
@@ -194,10 +363,32 @@ list_cron_jobs() {
     fi
 
     local i=1
+    declare -a JOBS
     while IFS= read -r line; do
+        JOBS[$i]="$line"
         echo "[$i] $line"
-        i=$((i + 1))
+        i=$((i+1))
     done <<< "$lines"
+
+    echo
+    read -rp "⚡ 是否选择其中一个任务立即执行一次？(y/N)： " run_now
+    case "$run_now" in
+        y|Y)
+            read -rp "🔢 请输入任务编号： " choice
+            if ! [[ "$choice" =~ ^[0-9]+$ ]] || [[ -z "${JOBS[$choice]}" ]]; then
+                echo "❌ 输入编号无效。"
+            else
+                local target="${JOBS[$choice]}"
+                # 去掉前 5 个字段（cron 表达式），剩下就是命令
+                local cmd_part
+                cmd_part=$(echo "$target" | awk '{ $1=""; $2=""; $3=""; $4=""; $5=""; sub(/^ +/, ""); print }')
+                echo "⚡ 正在立即执行：$cmd_part"
+                eval "$cmd_part"
+            fi
+            ;;
+        *)
+            ;;
+    esac
 
     pause
 }
@@ -220,7 +411,7 @@ delete_cron_job() {
     while IFS= read -r line; do
         JOBS[$i]="$line"
         echo "[$i] $line"
-        i=$((i + 1))
+        i=$((i+1))
     done <<< "$lines"
 
     read -rp "🔢 请输入要删除的任务编号： " choice
@@ -265,6 +456,10 @@ add_backup_job() {
         return
     fi
 
+    # 选择 FTP 账号
+    local ACCOUNT_ID
+    ACCOUNT_ID=$(select_ftp_account) || { pause; return; }
+
     echo
     echo "⏱ 请选择定时方式："
     echo "  1) 🕒 每天固定时间备份"
@@ -300,28 +495,36 @@ add_backup_job() {
             ;;
     esac
 
-    add_cron_job "$CRON_EXPR" "$LOCAL_PATH" "$REMOTE_DIR"
+    add_cron_job "$CRON_EXPR" "$LOCAL_PATH" "$REMOTE_DIR" "$ACCOUNT_ID"
+
+    echo
+    read -rp "⚡ 是否立即执行一次此备份任务？(Y/n)： " run_now
+    if [[ -z "$run_now" || "$run_now" =~ ^[Yy]$ ]]; then
+        run_backup "$ACCOUNT_ID" "$LOCAL_PATH" "$REMOTE_DIR"
+    fi
+
+    pause
 }
 
 uninstall_all() {
     echo "────────────────────────────────"
     echo "🧹 卸载工具"
     echo "────────────────────────────────"
-    read -rp "⚠️  确定要卸载吗？这会删除所有 FTP 配置和本工具创建的定时任务。(y/N)： " ans
+    read -rp "⚠️  确定要卸载吗？这会删除所有 FTP 账号配置和本工具创建的定时任务。(y/N)： " ans
     case "$ans" in
         y|Y)
-            # 删除带标记的 crontab 任务
-            local current
-            current=$(crontab -l 2>/dev/null || true)
-            if [[ -n "$current" ]]; then
-                echo "$current" | grep -v "$TAG" | crontab -
+            if command_exists crontab; then
+                local current
+                current=$(crontab -l 2>/dev/null || true)
+                if [[ -n "$current" ]]; then
+                    echo "$current" | grep -v "$TAG" | crontab -
+                fi
             fi
-
-            # 删除配置目录
             rm -rf "$CONFIG_DIR"
-
             echo "✅ 卸载完成（已删除 FTP 配置和相关定时任务）。"
             ;;
+
+            exit 0
         *)
             echo "ℹ️  已取消卸载。"
             ;;
@@ -333,36 +536,36 @@ uninstall_all() {
 show_menu() {
     clear
     echo "======================================="
-    echo "🌐 FTP 备份工具"
+    echo "🌐 FTP 备份工具（多账号版）"
     echo "======================================="
     echo
-
-    if is_ftp_configured; then
-        echo "🔐 FTP 状态：已配置 ✅"
+    local count
+    count=$(get_ftp_count)
+    if (( count > 0 )); then
+        echo "🔐 FTP 账号：已配置 $count 个 ✅"
     else
-        echo "🔐 FTP 状态：未配置 ❌（请先配置）"
+        echo "🔐 FTP 账号：未配置 ❌（请先添加账号）"
     fi
     echo
-
-    echo "1) 🔑 配置 / 修改 FTP 账号"
+    echo "1) 📂 管理 FTP 账号"
     echo "2) ➕ 新建备份任务"
-    echo "3) 📋 查看备份任务"
+    echo "3) 📋 查看/立即执行备份任务"
     echo "4) 🗑 删除备份任务"
     echo "5) 🧹 卸载"
     echo "0) ❎ 退出"
     echo
     read -rp "👉 请输入选项编号： " choice
 
-    # 没有 FTP 配置时，只允许选 1、5、0
+    # 没有任何 FTP 账号时，只允许进账号管理 / 卸载 / 退出
     if ! is_ftp_configured && [[ "$choice" != "1" && "$choice" != "5" && "$choice" != "0" ]]; then
         echo
-        echo "⚠️  当前尚未配置 FTP 账号，请先进行配置。"
+        echo "⚠️  当前尚未配置任何 FTP 账号，请先进入“管理 FTP 账号”添加。"
         pause
         return
     fi
 
     case "$choice" in
-        1) config_ftp ;;
+        1) ftp_account_menu ;;
         2) add_backup_job ;;
         3) list_cron_jobs ;;
         4) delete_cron_job ;;
@@ -374,14 +577,13 @@ show_menu() {
 
 # ===================== 入口逻辑 =====================
 
-# 如果以参数方式调用：用于 crontab 定时执行
+# crontab 调用：bash ftp_backup.sh run <ACCOUNT_ID> <LOCAL_PATH> <REMOTE_DIR>
 if [[ "$1" == "run" ]]; then
-    # run <LOCAL_PATH> <REMOTE_DIR>
-    run_backup "$2" "$3"
+    run_backup "$2" "$3" "$4"
     exit $?
 fi
 
-# 普通交互模式
+# 交互模式
 check_dependencies
 
 while true; do
