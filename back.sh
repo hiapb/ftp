@@ -129,6 +129,8 @@ load_ftp_account() {
     fi
     # shellcheck disable=SC1090
     source "$file"
+    # 兼容旧配置：默认使用 ftp
+    FTP_PROTO="${FTP_PROTO:-ftp}"
 }
 
 add_ftp_account() {
@@ -155,16 +157,27 @@ add_ftp_account() {
     read -rp "👤 FTP 用户名： " FTP_USER
     read -rp "🔒 FTP 密码： " FTP_PASS
 
+    echo
+    echo "🔐 请选择连接协议："
+    echo "  1) 普通 FTP"
+    echo "  2) 加密 FTPS"
+    read -rp "👉 请输入选项编号（默认 1）： " proto_choice
+    case "$proto_choice" in
+        2) FTP_PROTO="ftps" ;;
+        *) FTP_PROTO="ftp" ;;
+    esac
+
     cat > "$file" <<EOF
 ACCOUNT_ID="$ACCOUNT_ID"
 FTP_HOST="$FTP_HOST"
 FTP_PORT="$FTP_PORT"
 FTP_USER="$FTP_USER"
 FTP_PASS="$FTP_PASS"
+FTP_PROTO="$FTP_PROTO"
 EOF
 
     chmod 600 "$file"
-    echo "✅ 新 FTP 账号已保存：$ACCOUNT_ID"
+    echo "✅ 新 FTP 账号已保存：$ACCOUNT_ID （协议：$FTP_PROTO）"
     pause
 }
 
@@ -187,7 +200,8 @@ show_ftp_accounts() {
     for f in "${files[@]}"; do
         # shellcheck disable=SC1090
         source "$f"
-        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST  | 用户：$FTP_USER"
+        local proto="${FTP_PROTO:-ftp}"
+        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST  | 用户：$FTP_USER  | 协议：$proto"
         i=$((i+1))
     done
 
@@ -271,8 +285,9 @@ select_ftp_account() {
     for f in "${files[@]}"; do
         # shellcheck disable=SC1090
         source "$f"
+        local proto="${FTP_PROTO:-ftp}"
         ACCOUNT_IDS[$i]="$ACCOUNT_ID"
-        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST"
+        echo "[$i] 账号名：$ACCOUNT_ID  | 主机：$FTP_HOST  | 协议：$proto"
         i=$((i+1))
     done
 
@@ -287,6 +302,21 @@ select_ftp_account() {
     return 0
 }
 
+# 小工具：根据协议生成 lftp 里的 SSL 配置
+build_ssl_lines() {
+    local proto="$1"
+    if [[ "$proto" == "ftps" ]]; then
+        # 显式 FTPS（FTP over TLS）
+        printf '%s\n' \
+            "set ftp:ssl-force true" \
+            "set ftp:ssl-protect-data true" \
+            "set ftp:ssl-auth TLS"
+    else
+        # 普通 FTP 不需要额外配置
+        :
+    fi
+}
+
 browse_ftp_with_account() {
     CHOSEN_ACCOUNT_ID=""
     select_ftp_account || { pause; return; }
@@ -296,10 +326,11 @@ browse_ftp_with_account() {
 
     while true; do
         clear
+        local proto_label="${FTP_PROTO:-ftp}"
         echo "======================================="
         echo "🔍 FTP 远程浏览 / 下载 / 删除"
         echo "======================================="
-        echo "当前账号：$ACCOUNT_ID  ($FTP_USER@$FTP_HOST:$FTP_PORT)"
+        echo "当前账号：$ACCOUNT_ID  ($FTP_USER@$FTP_HOST:$FTP_PORT, 协议：$proto_label)"
         echo
         echo "1) 📁 列出某个远程目录内容"
         echo "2) 📥 下载远程文件到本地"
@@ -320,8 +351,10 @@ browse_ftp_with_account() {
                 fi
                 echo "📋 $REMOTE_DIR 下的内容："
                 echo "────────────────────────────────"
+                SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
 lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF | awk '!($NF=="." || $NF=="..")'
 set ssl:verify-certificate no
+$SSL_LINES
 cd "$REMOTE_DIR" || cd .
 ls
 bye
@@ -345,8 +378,10 @@ EOF
                 read -rp "⚠️ 确认下载文件 $RDIR/$RFN 到本地 $LDIR 并自动覆盖同名文件吗？(y/N)： " yn_dl
                 case "$yn_dl" in
                     y|Y)
-                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+                        SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 cd "$RDIR" || exit 1
 get "$RFN" -o "$LDIR/$RFN"
 bye
@@ -379,8 +414,10 @@ EOF
                 read -rp "⚠️ 确认 mirror 下载整个目录 $RDIR 到本地 $LDIR 吗？(y/N)： " yn_dir
                 case "$yn_dir" in
                     y|Y)
-                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+                        SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 mirror "$RDIR" "$LDIR"
 bye
 EOF
@@ -408,8 +445,10 @@ EOF
                 read -rp "⚠️ 确认要删除文件 $REMOTE_DIR/$REMOTE_FILE 吗？(y/N)： " yn
                 case "$yn" in
                     y|Y)
-                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+                        SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 cd "$REMOTE_DIR" || exit 1
 rm "$REMOTE_FILE"
 bye
@@ -437,8 +476,10 @@ EOF
                 read -rp "⚠️ 确认**删除整个目录** $REMOTE_DIR 吗？此操作不可恢复！(y/N)： " yn2
                 case "$yn2" in
                     y|Y)
-                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+                        SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 rm -r "$REMOTE_DIR"
 bye
 EOF
@@ -507,14 +548,17 @@ run_backup() {
     fi
 
     echo "🚀 开始备份："
-    echo "  👤 FTP 账号：$ACCOUNT_ID ($FTP_USER@$FTP_HOST:$FTP_PORT)"
+    echo "  👤 FTP 账号：$ACCOUNT_ID ($FTP_USER@$FTP_HOST:$FTP_PORT, 协议：${FTP_PROTO:-ftp})"
     echo "  📁 本地路径：$LOCAL_PATH"
     echo "  📂 FTP 目标目录：$REMOTE_DIR"
 
+    SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+
     if [[ -d "$LOCAL_PATH" ]]; then
         # 目录：mirror -R
-        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 mkdir -p "$REMOTE_DIR"
 mirror -R "$LOCAL_PATH" "$REMOTE_DIR"
 bye
@@ -523,8 +567,9 @@ EOF
         # 文件：put
         local filename
         filename="$(basename "$LOCAL_PATH")"
-        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
 set ssl:verify-certificate no
+$SSL_LINES
 mkdir -p "$REMOTE_DIR"
 cd "$REMOTE_DIR"
 put "$LOCAL_PATH" -o "$filename"
@@ -710,6 +755,7 @@ add_backup_job() {
     esac
 
     add_cron_job "$CRON_EXPR" "$LOCAL_PATH" "$REMOTE_DIR" "$ACCOUNT_ID"
+
 
     echo
     read -rp "⚡ 是否立即执行一次此备份任务？(Y/n)： " run_now
