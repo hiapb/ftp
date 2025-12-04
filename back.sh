@@ -19,7 +19,7 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-
+# 如果是通过 bash <(curl ...) 这种方式运行，自动落盘到 INSTALL_PATH
 normalize_script_path() {
     if [[ "$SCRIPT_PATH" == /dev/fd/* ]] || [[ "$SCRIPT_PATH" == /proc/*/fd/* ]] || [[ "$SCRIPT_PATH" == *"pipe:"* ]]; then
         # 如果还没有正式安装文件，就自动创建一个
@@ -297,13 +297,15 @@ browse_ftp_with_account() {
     while true; do
         clear
         echo "======================================="
-        echo "🔍 FTP 远程浏览 / 删除"
+        echo "🔍 FTP 远程浏览 / 下载 / 删除"
         echo "======================================="
         echo "当前账号：$ACCOUNT_ID  ($FTP_USER@$FTP_HOST:$FTP_PORT)"
         echo
         echo "1) 📁 列出某个远程目录内容"
-        echo "2) ❌ 删除远程文件"
-        echo "3) ⚠️ 删除远程目录"
+        echo "2) 📥 下载远程文件到本地"
+        echo "3) 📥 下载远程目录到本地"
+        echo "4) ❌ 删除远程文件"
+        echo "5) ⚠️ 删除远程目录"
         echo "0) ⬅ 返回上一层"
         echo
         read -rp "👉 请输入选项编号： " sub
@@ -324,11 +326,78 @@ cd "$REMOTE_DIR" || cd .
 ls
 bye
 EOF
-
                 echo "────────────────────────────────"
                 pause
                 ;;
             2)
+                read -rp "📂 请输入远程文件所在目录（例如 /backup/www）： " RDIR
+                read -rp "📄 请输入远程文件名（例如 index.html）： " RFN
+                read -rp "📁 请输入下载到本地的目录（例如 /root/download）： " LDIR
+
+                if [[ -z "$RDIR" || -z "$RFN" || -z "$LDIR" ]]; then
+                    echo "❌ 目录、文件名和本地目录都不能为空。"
+                    pause
+                    continue
+                fi
+
+                mkdir -p "$LDIR"
+
+                read -rp "⚠️ 确认下载文件 $RDIR/$RFN 到本地 $LDIR 并自动覆盖同名文件吗？(y/N)： " yn_dl
+                case "$yn_dl" in
+                    y|Y)
+                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+set ssl:verify-certificate no
+cd "$RDIR" || exit 1
+get "$RFN" -o "$LDIR/$RFN"
+bye
+EOF
+                        if [[ $? -eq 0 ]]; then
+                            echo "✅ 文件已下载到：$LDIR/$RFN"
+                        else
+                            echo "❌ 下载失败，请检查路径和权限。"
+                        fi
+                        pause
+                        ;;
+                    *)
+                        echo "ℹ️ 已取消下载。"
+                        pause
+                        ;;
+                esac
+                ;;
+            3)
+                read -rp "📂 请输入要下载的远程目录路径（例如 /test）： " RDIR
+                read -rp "📁 请输入下载到本地的目录（例如 /root/download）： " LDIR
+
+                if [[ -z "$RDIR" || -z "$LDIR" ]]; then
+                    echo "❌ 远程目录和本地目录都不能为空。"
+                    pause
+                    continue
+                fi
+
+                mkdir -p "$LDIR"
+
+                read -rp "⚠️ 确认 mirror 下载整个目录 $RDIR 到本地 $LDIR 吗？(y/N)： " yn_dir
+                case "$yn_dir" in
+                    y|Y)
+                        lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$FTP_HOST" <<EOF
+set ssl:verify-certificate no
+mirror "$RDIR" "$LDIR"
+bye
+EOF
+                        if [[ $? -eq 0 ]]; then
+                            echo "✅ 目录已成功下载到：$LDIR"
+                        else
+                            echo "❌ 目录下载失败，请检查路径和权限。"
+                        fi
+                        pause
+                        ;;
+                    *)
+                        echo "ℹ️ 已取消目录下载。"
+                        pause
+                        ;;
+                esac
+                ;;
+            4)
                 read -rp "📂 请输入文件所在远程目录（例如 /backup/www）： " REMOTE_DIR
                 read -rp "📄 请输入要删除的文件名（例如 index.html）： " REMOTE_FILE
                 if [[ -z "$REMOTE_DIR" || -z "$REMOTE_FILE" ]]; then
@@ -358,7 +427,7 @@ EOF
                         ;;
                 esac
                 ;;
-            3)
+            5)
                 read -rp "📂 请输入要删除的远程目录（例如 /backup/tmp）： " REMOTE_DIR
                 if [[ -z "$REMOTE_DIR" ]]; then
                     echo "❌ 远程目录不能为空。"
@@ -408,7 +477,7 @@ ftp_account_menu() {
         echo "1) ➕ 新增 FTP 账号"
         echo "2) 📋 查看 FTP 账号列表"
         echo "3) 🗑 删除 FTP 账号"
-        echo "4) 🔍 使用账号浏览/删除远程文件"
+        echo "4) 🔍 使用账号浏览/下载/删除远程文件"
         echo "0) ⬅ 返回主菜单"
         echo
         read -rp "👉 请输入选项编号： " choice
@@ -685,7 +754,6 @@ uninstall_all() {
     esac
     pause
 }
-
 
 # ===================== 主菜单 =====================
 show_menu() {
