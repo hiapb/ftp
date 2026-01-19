@@ -628,6 +628,119 @@ EOF
     done
 }
 
+edit_ftp_account() {
+    echo "────────────────────────────────"
+    echo "✏️ 修改账号"
+    echo "────────────────────────────────"
+
+    CHOSEN_ACCOUNT_ID=""
+    select_ftp_account || { pause; return; }
+    local ACCOUNT_ID="$CHOSEN_ACCOUNT_ID"
+    local file="$ACCOUNTS_DIR/$ACCOUNT_ID.conf"
+
+    load_ftp_account "$ACCOUNT_ID" || { pause; return; }
+
+    # 确保默认值
+    FTP_PROTO="${FTP_PROTO:-ftp}"
+    FTP_HOST="${FTP_HOST:-}"
+    FTP_PORT="${FTP_PORT:-}"
+    FTP_USER="${FTP_USER:-}"
+    FTP_PASS="${FTP_PASS:-}"
+
+    while true; do
+        clear
+        echo "======================================="
+        echo "✏️ 正在修改账号：$ACCOUNT_ID"
+        echo "======================================="
+        echo "[1] 连接类型：$(proto_to_type "$FTP_PROTO")"
+        echo "[2] 远程主机：$FTP_HOST"
+        echo "[3] 远程端口：$FTP_PORT"
+        echo "[4] 用户名  ：$FTP_USER"
+        echo "[5] 密码    ：(已隐藏)"
+        echo "[6] 保存并退出"
+        echo "[0] 不保存退出"
+        echo
+
+        read -rp "👉 请选择要修改的项： " op
+        case "$op" in
+            1)
+                echo "🔐 请选择连接类型："
+                echo "  1) FTP"
+                echo "  2) FTPS"
+                echo "  3) SFTP"
+                read -rp "👉 请输入选项编号（回车取消）： " p
+                case "$p" in
+                    1) FTP_PROTO="ftp" ;;
+                    2) FTP_PROTO="ftps" ;;
+                    3) FTP_PROTO="sftp" ;;
+                    "") ;;
+                    *) echo "❌ 无效选项"; sleep 1 ;;
+                esac
+
+                # 如果端口为空，按协议给个合理默认
+                if [[ -z "$FTP_PORT" ]]; then
+                    case "$FTP_PROTO" in
+                        sftp) FTP_PORT=22 ;;
+                        *)    FTP_PORT=21 ;;
+                    esac
+                fi
+                ;;
+            2)
+                read -rp "🌐 输入新主机（回车取消）： " v
+                [[ -n "$v" ]] && FTP_HOST="$v"
+                ;;
+            3)
+                read -rp "🔢 输入新端口（回车取消）： " v
+                if [[ -n "$v" ]]; then
+                    if [[ "$v" =~ ^[0-9]+$ ]] && (( v >= 1 && v <= 65535 )); then
+                        FTP_PORT="$v"
+                    else
+                        echo "❌ 端口必须是 1-65535 的数字"
+                        sleep 1
+                    fi
+                fi
+                ;;
+            4)
+                read -rp "👤 输入新用户名（回车取消）： " v
+                [[ -n "$v" ]] && FTP_USER="$v"
+                ;;
+            5)
+                read -rp "🔒 输入新密码（回车取消）： " v
+                [[ -n "$v" ]] && FTP_PASS="$v"
+                ;;
+            6)
+                # 保存：复用你原来的密码转义逻辑
+                local ESCAPED_PASS
+                ESCAPED_PASS=${FTP_PASS//\\/\\\\}
+                ESCAPED_PASS=${ESCAPED_PASS//\"/\\\"}
+                ESCAPED_PASS=${ESCAPED_PASS//$/\\$}
+
+                cat > "$file" <<EOF
+ACCOUNT_ID="$ACCOUNT_ID"
+FTP_HOST="$FTP_HOST"
+FTP_PORT="$FTP_PORT"
+FTP_USER="$FTP_USER"
+FTP_PASS="$ESCAPED_PASS"
+FTP_PROTO="$FTP_PROTO"
+EOF
+                chmod 600 "$file"
+                echo "✅ 已保存：$file"
+                pause
+                return
+                ;;
+            0)
+                echo "ℹ️ 未保存，已退出。"
+                pause
+                return
+                ;;
+            *)
+                echo "❌ 无效选项"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 ftp_account_menu() {
     while true; do
         clear
@@ -637,18 +750,21 @@ ftp_account_menu() {
         echo "当前账号数量：$(get_ftp_count)"
         echo
         echo "1) ➕ 新增账号"
-        echo "2) 📋 查看账号列表"
-        echo "3) 🗑 删除账号"
-        echo "4) 🔍 使用账号浏览/下载/删除远程文件"
+        echo "2) ✏️ 修改账号"
+        echo "3) 📋 查看账号列表"
+        echo "4) 🗑 删除账号"
+        echo "5) 🔍 使用账号浏览/下载/删除远程文件"
         echo "0) ⬅ 返回主菜单"
+
         echo
         read -rp "👉 请输入选项编号： " choice
 
         case "$choice" in
             1) add_ftp_account ;;
-            2) show_ftp_accounts ;;
-            3) delete_ftp_account ;;
-            4) browse_ftp_with_account ;;
+            2) edit_ftp_account ;;
+            3) show_ftp_accounts ;;
+            4) delete_ftp_account ;;
+            5) browse_ftp_with_account ;;
             0) break ;;
             *) echo "❌ 无效选项。"; pause ;;
         esac
