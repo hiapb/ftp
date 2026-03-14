@@ -851,12 +851,18 @@ add_cron_job() {
     local REMOTE_DIR="$3"
     local ACCOUNT_ID="$4"
 
-    LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
-    REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
+    local SCRIPT_ESC ACCOUNT_ESC LOCAL_ESC REMOTE_ESC MARK CRON_LINE
 
-    local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG[$ACCOUNT_ID]"
+    SCRIPT_ESC=$(printf '%q' "$SCRIPT_PATH")
+    ACCOUNT_ESC=$(printf '%q' "$ACCOUNT_ID")
+    LOCAL_ESC=$(printf '%q' "$LOCAL_PATH")
+    REMOTE_ESC=$(printf '%q' "$REMOTE_DIR")
 
-    (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
+    MARK="# FTP_BACKUP[$ACCOUNT_ID]"
+
+    CRON_LINE="$CRON_EXPR PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash $SCRIPT_ESC run $ACCOUNT_ESC $LOCAL_ESC $REMOTE_ESC >> /tmp/ftp_backup.log 2>&1 $MARK"
+
+    (crontab -l 2>/dev/null | grep -vF "$MARK"; echo "$CRON_LINE") | crontab -
 
     echo "✅ 定时任务已添加："
     echo "   $CRON_LINE"
