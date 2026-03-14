@@ -800,13 +800,13 @@ run_backup() {
         SSL_VERIFY_LINE="set ssl:verify-certificate no"
     fi
 
-    # 【修复核心】注入全局防死锁、致命错误立即中断参数、以及覆写权限
+    # 【修复核心】注入全局防死锁、致命错误立即中断参数，并将 auto 更正为绝对防御的 on
     local GLOBAL_OPTS="
 set cmd:fail-exit yes
 set net:timeout 15
 set net:max-retries 3
 set net:persist-retries 0
-set ftp:passive-mode auto
+set ftp:passive-mode on
 set xfer:clobber on"
 
     if [[ -d "$LOCAL_PATH" ]]; then
@@ -854,7 +854,8 @@ add_cron_job() {
     LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
     REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
 
-    local CRON_LINE="$CRON_EXPR bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" $TAG[$ACCOUNT_ID]"
+    # 【修复核心】强制注入 PATH 并掐断所有输出流，彻底隔绝 MTA 邮件风暴和日志冗余
+    local CRON_LINE="$CRON_EXPR export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"; bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" >/dev/null 2>&1 $TAG[$ACCOUNT_ID]"
 
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
 
