@@ -794,13 +794,24 @@ run_backup() {
     SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
     SFTP_LINES="$(build_sftp_lines "$FTP_PROTO")"
     LFTP_TARGET="$(get_lftp_target "$FTP_PROTO" "$FTP_HOST")"
-    SSL_VERIFY_LINE=""
+    
+    local SSL_VERIFY_LINE=""
     if [[ "$FTP_PROTO" != "sftp" ]]; then
         SSL_VERIFY_LINE="set ssl:verify-certificate no"
     fi
 
+    # 【修复核心】注入全局防死锁、致命错误立即中断参数、以及覆写权限
+    local GLOBAL_OPTS="
+set cmd:fail-exit yes
+set net:timeout 15
+set net:max-retries 3
+set net:persist-retries 0
+set ftp:passive-mode auto
+set xfer:clobber on"
+
     if [[ -d "$LOCAL_PATH" ]]; then
 lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$LFTP_TARGET" <<EOF
+$GLOBAL_OPTS
 $SSL_VERIFY_LINE
 $SSL_LINES
 $SFTP_LINES
@@ -812,6 +823,7 @@ EOF
         local filename
         filename="$(basename "$LOCAL_PATH")"
 lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$LFTP_TARGET" <<EOF
+$GLOBAL_OPTS
 $SSL_VERIFY_LINE
 $SSL_LINES
 $SFTP_LINES
@@ -822,10 +834,13 @@ bye
 EOF
     fi
 
+    # 现在的 $? 是真正准确的退出码了
     if [[ $? -eq 0 ]]; then
         echo "✅ 备份完成。"
     else
-        echo "❌ 备份失败，请检查网络与配置。"
+        echo "❌ 致命错误：备份中断。请检查："
+        echo "   1. 远程目录是否具有读写权限（尝试将 /backup 改为相对路径 backup）。"
+        echo "   2. 如果使用 FTP，请确保 VPS 安全组已放行被动模式随机高端口。"
         return 1
     fi
 }
