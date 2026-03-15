@@ -816,7 +816,7 @@ $SSL_VERIFY_LINE
 $SSL_LINES
 $SFTP_LINES
 mkdir -p "$REMOTE_DIR"
-mirror -R "$LOCAL_PATH" "$REMOTE_DIR"
+mirror -R --delete "$LOCAL_PATH" "$REMOTE_DIR"
 bye
 EOF
     else
