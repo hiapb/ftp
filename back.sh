@@ -4,6 +4,7 @@ CONFIG_DIR="$HOME/.ftp_backup_tool"
 ACCOUNTS_DIR="$CONFIG_DIR/accounts"
 CONFIG_FILE="$CONFIG_DIR/ftp.conf"
 TAG="# FTP_BACKUP"
+KEEP_COUNT="${FTP_KEEP_COUNT:-3}"
 
 RAW_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 SCRIPT_PATH="$RAW_SCRIPT_PATH"
@@ -15,6 +16,17 @@ mkdir -p "$ACCOUNTS_DIR"
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+lftp_escape() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '%s' "$value"
 }
 
 normalize_script_path() {
@@ -771,6 +783,162 @@ ftp_account_menu() {
     done
 }
 
+build_lftp_common_vars() {
+    SSL_LINES="$(build_ssl_lines "$FTP_PROTO")"
+    SFTP_LINES="$(build_sftp_lines "$FTP_PROTO")"
+    LFTP_TARGET="$(get_lftp_target "$FTP_PROTO" "$FTP_HOST")"
+    SSL_VERIFY_LINE=""
+    if [[ "$FTP_PROTO" != "sftp" ]]; then
+        SSL_VERIFY_LINE="set ssl:verify-certificate no"
+    fi
+}
+
+build_keep_file_list() {
+    local local_path="$1"
+    local keep="$2"
+
+    find "$local_path" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null \
+        | sort -nr \
+        | head -n "$keep" \
+        | cut -d' ' -f2-
+}
+
+escape_ere() {
+    printf '%s' "$1" | sed 's/[][(){}.^$+*?|\\]/\\&/g'
+}
+
+derive_backup_regex() {
+    local name="$1"
+
+    if [[ "$name" =~ ^(.+)([._-])([0-9]{8})([._-])([0-9]{6})(\..+)$ ]]; then
+        printf '^%s[0-9]{8}%s[0-9]{6}%s$\n' \
+            "$(escape_ere "${BASH_REMATCH[1]}${BASH_REMATCH[2]}")" \
+            "$(escape_ere "${BASH_REMATCH[4]}")" \
+            "$(escape_ere "${BASH_REMATCH[6]}")"
+        return 0
+    fi
+
+    if [[ "$name" =~ ^(.+)([._-])([0-9]{14})(\..+)$ ]]; then
+        printf '^%s[0-9]{14}%s$\n' \
+            "$(escape_ere "${BASH_REMATCH[1]}${BASH_REMATCH[2]}")" \
+            "$(escape_ere "${BASH_REMATCH[4]}")"
+        return 0
+    fi
+
+    if [[ "$name" =~ ^(.+)([._-])([0-9]{4}-[0-9]{2}-[0-9]{2})([._-])([0-9]{2}[-_][0-9]{2}[-_][0-9]{2})(\..+)$ ]]; then
+        printf '^%s[0-9]{4}-[0-9]{2}-[0-9]{2}%s[0-9]{2}[-_][0-9]{2}[-_][0-9]{2}%s$\n' \
+            "$(escape_ere "${BASH_REMATCH[1]}${BASH_REMATCH[2]}")" \
+            "$(escape_ere "${BASH_REMATCH[4]}")" \
+            "$(escape_ere "${BASH_REMATCH[6]}")"
+        return 0
+    fi
+
+    return 1
+}
+
+build_backup_regex_list() {
+    local keep_list="$1"
+    local file
+    local regex
+
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        regex="$(derive_backup_regex "$file" || true)"
+        [[ -n "$regex" ]] && printf '%s\n' "$regex"
+    done <<< "$keep_list" | awk 'NF && !seen[$0]++'
+}
+
+matches_backup_regex_list() {
+    local name="$1"
+    local regex_list="$2"
+    local regex
+
+    while IFS= read -r regex; do
+        [[ -n "$regex" ]] || continue
+        if [[ "$name" =~ $regex ]]; then
+            return 0
+        fi
+    done <<< "$regex_list"
+
+    return 1
+}
+
+prune_remote_files_not_in_local_keep() {
+    local local_path="$1"
+    local remote_dir="$2"
+    local keep="$3"
+    local keep_list
+    local backup_regex_list
+    local remote_files
+    local delete_list=""
+    local file
+
+    keep_list="$(build_keep_file_list "$local_path" "$keep")"
+    if [[ -z "$keep_list" ]]; then
+        echo "ℹ️  本地目录没有可保留的普通文件，跳过远端旧文件清理。"
+        return 0
+    fi
+
+    backup_regex_list="$(build_backup_regex_list "$keep_list")"
+    if [[ -z "$backup_regex_list" ]]; then
+        echo "ℹ️  未识别到备份文件的时间戳命名规则，为避免误删其它文件，跳过远端旧文件清理。"
+        return 0
+    fi
+
+    build_lftp_common_vars
+
+    remote_files="$(lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$LFTP_TARGET" <<EOF | awk 'NF && $0!="." && $0!=".." {print}'
+$SSL_VERIFY_LINE
+$SSL_LINES
+$SFTP_LINES
+cd "$remote_dir" || exit 1
+cls -1
+bye
+EOF
+)"
+
+    if [[ -z "$remote_files" ]]; then
+        echo "ℹ️  未获取到远端普通文件列表，跳过旧文件清理。"
+        return 0
+    fi
+
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        if grep -Fxq "$file" <<< "$keep_list"; then
+            continue
+        fi
+        if matches_backup_regex_list "$file" "$backup_regex_list"; then
+            delete_list+="$file"$'\n'
+        fi
+    done <<< "$remote_files"
+
+    if [[ -z "$delete_list" ]]; then
+        echo "✅ 远端已符合保留最新 $keep 份，无需额外清理。"
+        return 0
+    fi
+
+    echo "🧹 正在清理远端旧备份，只保留本地最新 $keep 份："
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        echo "  删除：$file"
+    done <<< "$delete_list"
+
+    local delete_cmds=""
+    while IFS= read -r file; do
+        [[ -n "$file" ]] || continue
+        delete_cmds+="rm \"$(lftp_escape "$file")\""$'\n'
+    done <<< "$delete_list"
+
+lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$LFTP_TARGET" <<EOF
+$SSL_VERIFY_LINE
+$SSL_LINES
+$SFTP_LINES
+cd "$remote_dir" || exit 1
+$delete_cmds
+bye
+EOF
+}
+
 run_backup() {
     local ACCOUNT_ID="$1"
     local LOCAL_PATH="$2"
@@ -809,6 +977,8 @@ set net:persist-retries 0
 set ftp:passive-mode on
 set xfer:clobber on"
 
+    local backup_status=0
+
     if [[ -d "$LOCAL_PATH" ]]; then
 lftp -u "$FTP_USER","$FTP_PASS" -p "$FTP_PORT" "$LFTP_TARGET" <<EOF
 $GLOBAL_OPTS
@@ -816,9 +986,10 @@ $SSL_VERIFY_LINE
 $SSL_LINES
 $SFTP_LINES
 mkdir -p "$REMOTE_DIR"
-mirror -R --delete "$LOCAL_PATH" "$REMOTE_DIR"
+mirror -R "$LOCAL_PATH" "$REMOTE_DIR"
 bye
 EOF
+        backup_status=$?
     else
         local filename
         filename="$(basename "$LOCAL_PATH")"
@@ -832,10 +1003,17 @@ cd "$REMOTE_DIR"
 put "$LOCAL_PATH" -o "$filename"
 bye
 EOF
+        backup_status=$?
     fi
 
     # 现在的 $? 是真正准确的退出码了
-    if [[ $? -eq 0 ]]; then
+    if [[ $backup_status -eq 0 ]]; then
+        if [[ -d "$LOCAL_PATH" ]]; then
+            prune_remote_files_not_in_local_keep "$LOCAL_PATH" "$REMOTE_DIR" "$KEEP_COUNT" || {
+                echo "❌ 备份已上传，但远端旧备份清理失败。请检查远程目录删除权限。"
+                return 1
+            }
+        fi
         echo "✅ 备份完成。"
     else
         echo "❌ 致命错误：备份中断。请检查："
@@ -854,8 +1032,11 @@ add_cron_job() {
     LOCAL_ESC=${LOCAL_PATH//\"/\\\"}
     REMOTE_ESC=${REMOTE_DIR//\"/\\\"}
 
+    local script_q
+    script_q="$(shell_quote "$SCRIPT_PATH")"
+
     # 【修复核心】强制注入 PATH 并掐断所有输出流，彻底隔绝 MTA 邮件风暴和日志冗余
-    local CRON_LINE="$CRON_EXPR export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"; bash $SCRIPT_PATH run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" >/dev/null 2>&1 $TAG[$ACCOUNT_ID]"
+    local CRON_LINE="$CRON_EXPR export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"; bash $script_q run \"$ACCOUNT_ID\" \"$LOCAL_ESC\" \"$REMOTE_ESC\" >/dev/null 2>&1 $TAG[$ACCOUNT_ID]"
 
     (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
 
