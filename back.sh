@@ -5,6 +5,7 @@ ACCOUNTS_DIR="$CONFIG_DIR/accounts"
 CONFIG_FILE="$CONFIG_DIR/ftp.conf"
 TAG="# FTP_BACKUP"
 KEEP_COUNT="${FTP_KEEP_COUNT:-3}"
+SCRIPT_VERSION="20260529.1"
 
 RAW_SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 SCRIPT_PATH="$RAW_SCRIPT_PATH"
@@ -29,17 +30,23 @@ lftp_escape() {
     printf '%s' "$value"
 }
 
+download_script_to() {
+    local dest="$1"
+
+    if command_exists curl; then
+        curl -fsSL "$SCRIPT_URL" -o "$dest"
+    elif command_exists wget; then
+        wget -qO "$dest" "$SCRIPT_URL"
+    else
+        return 1
+    fi
+}
+
 normalize_script_path() {
     if [[ "$SCRIPT_PATH" == /dev/fd/* ]] || [[ "$SCRIPT_PATH" == /proc/*/fd/* ]] || [[ "$SCRIPT_PATH" == *"pipe:"* ]]; then
         if [[ ! -f "$INSTALL_PATH" ]]; then
             echo "📥 检测到通过 bash <(curl ...) 运行，正在自动安装脚本到：$INSTALL_PATH"
-            if command_exists curl; then
-                curl -fsSL "$SCRIPT_URL" -o "$INSTALL_PATH" || cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
-            elif command_exists wget; then
-                wget -qO "$INSTALL_PATH" "$SCRIPT_URL" || cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
-            else
-                cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
-            fi
+            download_script_to "$INSTALL_PATH" || cat "$RAW_SCRIPT_PATH" > "$INSTALL_PATH"
             chmod +x "$INSTALL_PATH"
             echo "✅ 安装完成，以后 crontab 将使用：$INSTALL_PATH"
         fi
@@ -48,6 +55,51 @@ normalize_script_path() {
 }
 
 normalize_script_path
+
+self_update() {
+    local tmp
+    local remote_version
+
+    [[ "${FTP_AUTO_UPDATE:-1}" == "1" ]] || return 0
+    [[ "${FTP_SKIP_SELF_UPDATE:-0}" != "1" ]] || return 0
+    [[ -f "$SCRIPT_PATH" ]] || return 0
+
+    tmp="$(mktemp)" || return 0
+    if ! download_script_to "$tmp"; then
+        rm -f "$tmp"
+        return 0
+    fi
+
+    if cmp -s "$tmp" "$SCRIPT_PATH"; then
+        rm -f "$tmp"
+        return 0
+    fi
+
+    remote_version="$(sed -n 's/^SCRIPT_VERSION="\([^"]*\)".*/\1/p' "$tmp" | head -n 1)"
+    if [[ -n "$remote_version" && "$remote_version" < "$SCRIPT_VERSION" ]]; then
+        rm -f "$tmp"
+        return 0
+    fi
+
+    if command_exists bash && ! bash -n "$tmp" >/dev/null 2>&1; then
+        echo "检测到新版脚本，但语法检查未通过，已跳过自动更新。"
+        rm -f "$tmp"
+        return 0
+    fi
+
+    if cp "$tmp" "$SCRIPT_PATH"; then
+        chmod +x "$SCRIPT_PATH" 2>/dev/null || true
+        rm -f "$tmp"
+        echo "已自动更新到最新版，正在重新执行。"
+        FTP_SKIP_SELF_UPDATE=1 exec bash "$SCRIPT_PATH" "$@"
+    fi
+
+    rm -f "$tmp"
+    echo "检测到新版脚本，但当前路径无法覆盖：$SCRIPT_PATH"
+    return 0
+}
+
+self_update "$@"
 
 pause() {
     echo
@@ -797,6 +849,11 @@ build_keep_file_list() {
     local local_path="$1"
     local keep="$2"
 
+    if [[ -f "$local_path" ]]; then
+        basename "$local_path"
+        return 0
+    fi
+
     find "$local_path" -maxdepth 1 -type f -printf '%T@ %f\n' 2>/dev/null \
         | sort -nr \
         | head -n "$keep" \
@@ -830,6 +887,33 @@ derive_backup_regex() {
             "$(escape_ere "${BASH_REMATCH[1]}${BASH_REMATCH[2]}")" \
             "$(escape_ere "${BASH_REMATCH[4]}")" \
             "$(escape_ere "${BASH_REMATCH[6]}")"
+        return 0
+    fi
+
+    return 1
+}
+
+backup_sort_key_from_name() {
+    local name="$1"
+
+    if [[ "$name" =~ ^.+[._-]([0-9]{8})[._-]([0-9]{6})(\..+)$ ]]; then
+        printf '%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+
+    if [[ "$name" =~ ^.+[._-]([0-9]{14})(\..+)$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+
+    if [[ "$name" =~ ^.+[._-]([0-9]{4})-([0-9]{2})-([0-9]{2})[._-]([0-9]{2})[-_]([0-9]{2})[-_]([0-9]{2})(\..+)$ ]]; then
+        printf '%s%s%s%s%s%s\n' \
+            "${BASH_REMATCH[1]}" \
+            "${BASH_REMATCH[2]}" \
+            "${BASH_REMATCH[3]}" \
+            "${BASH_REMATCH[4]}" \
+            "${BASH_REMATCH[5]}" \
+            "${BASH_REMATCH[6]}"
         return 0
     fi
 
@@ -872,6 +956,13 @@ prune_remote_files_not_in_local_keep() {
     local remote_files
     local delete_list=""
     local file
+    local regex
+    local key
+    local group_delete_list
+
+    if ! [[ "$keep" =~ ^[0-9]+$ ]] || (( keep < 1 )); then
+        keep=3
+    fi
 
     keep_list="$(build_keep_file_list "$local_path" "$keep")"
     if [[ -z "$keep_list" ]]; then
@@ -902,15 +993,27 @@ EOF
         return 0
     fi
 
-    while IFS= read -r file; do
-        [[ -n "$file" ]] || continue
-        if grep -Fxq "$file" <<< "$keep_list"; then
-            continue
+    while IFS= read -r regex; do
+        [[ -n "$regex" ]] || continue
+
+        group_delete_list="$(
+            while IFS= read -r file; do
+                [[ -n "$file" ]] || continue
+                if [[ "$file" =~ $regex ]]; then
+                    key="$(backup_sort_key_from_name "$file" || true)"
+                    [[ -n "$key" ]] && printf '%s\t%s\n' "$key" "$file"
+                fi
+            done <<< "$remote_files" \
+                | sort -r \
+                | awk -F '\t' -v keep="$keep" 'NR > keep {print $2}'
+        )"
+
+        if [[ -n "$group_delete_list" ]]; then
+            delete_list+="$group_delete_list"$'\n'
         fi
-        if matches_backup_regex_list "$file" "$backup_regex_list"; then
-            delete_list+="$file"$'\n'
-        fi
-    done <<< "$remote_files"
+    done <<< "$backup_regex_list"
+
+    delete_list="$(printf '%s' "$delete_list" | awk 'NF && !seen[$0]++')"
 
     if [[ -z "$delete_list" ]]; then
         echo "✅ 远端已符合保留最新 $keep 份，无需额外清理。"
@@ -1008,12 +1111,10 @@ EOF
 
     # 现在的 $? 是真正准确的退出码了
     if [[ $backup_status -eq 0 ]]; then
-        if [[ -d "$LOCAL_PATH" ]]; then
-            prune_remote_files_not_in_local_keep "$LOCAL_PATH" "$REMOTE_DIR" "$KEEP_COUNT" || {
+        prune_remote_files_not_in_local_keep "$LOCAL_PATH" "$REMOTE_DIR" "$KEEP_COUNT" || {
                 echo "❌ 备份已上传，但远端旧备份清理失败。请检查远程目录删除权限。"
                 return 1
-            }
-        fi
+        }
         echo "✅ 备份完成。"
     else
         echo "❌ 致命错误：备份中断。请检查："
